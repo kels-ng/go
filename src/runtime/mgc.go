@@ -1048,8 +1048,8 @@ var work struct {
 	nwait  uint32
 
 	// Number of roots of various root types. Set by gcMarkRootPrepare.
-	nFlushCacheRoots                               int
-	nDataRoots, nBSSRoots, nSpanRoots, nStackRoots int
+	nFlushCacheRoots                                             int
+	nDataRoots, nBSSRoots, nSpanRoots, nMatureRoots, nStackRoots int
 
 	// Each type of GC state transition is protected by a lock.
 	// Since multiple threads can simultaneously detect the state
@@ -1118,6 +1118,30 @@ var work struct {
 
 	// debug.gctrace heap sizes for this cycle.
 	heap0, heap1, heap2, heapGoal uint64
+
+	// genRunCount records the count of generational GCs since
+	// the last full GC. 0 indicates the last GC was a full GC.
+	//
+	// fullRunCount records the count of full GCs since
+	// the last generational GC. 0 indicates the last GC was
+	// a generational GC.
+	fullRunCount, genRunCount uint64
+
+	// genMarkConsEWMA is the exponential weighted moving average
+	// across all generational GCs.
+	// fullMarkConsEWMA is the exponential weighted moving
+	// average across all full GCs.
+	// These values are used to determine whether a cycle should
+	// be full GC or a generational GC.
+	genMarkConsEWMA, fullMarkConsEWMA float64
+
+	// fullSwitchCount is the number of full GCs to do
+	// before doing another generational GC.
+	// It is (re)calculated in mark termination at the end
+	// of a generational cycle based on the mark/cons ratio
+	// the generational GC compared to the mark/cons ratio
+	// of a full GC, see above.
+	fullSwitchCount, fullSwitchBase, genSwitchBase uint64
 }
 
 // GC runs a garbage collection and blocks the caller until the

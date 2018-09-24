@@ -21,10 +21,29 @@ const (
 	// BSS root.
 	rootBlockBytes = 256 << 10
 
+	// rootBlockSpans is the number of spans to scan per span
+	// root.
+	rootBlockSpans = 8 * 1024 // 64MB worth of spans
+
+	// cardShardBytes is the number of bytes in a shard of cards.
+	// Assuming one can scan about 1MB of heap in 1ms and that
+	// we want to keep the amount of work done by the root scanning
+	// code to between 100us to 1ms then the number of pages one
+	// unit of card marking should do is .5 MB or 512KB. If
+	// card size is 1K byte then 512 cards per shard
+	// results in scanning up to 512KB.
+	cardShardBytes = 512 << 10 // Bytes of heap to scan in each shard.
+	cardsPerShard  = cardShardBytes / cardBytes
+
+	// cardShardsPerArena is the number of card shards in each arena.
+	// cardShardsPerArena * the number of arenas is how many
+	// shards are needed for card marking.
+	cardShardsPerArena = heapArenaBytes / (cardsPerShard * cardBytes)
+
 	// maxObletBytes is the maximum bytes of an object to scan at
 	// once. Larger objects will be split up into "oblets" of at
-	// most this size. Since we can scan 1–2 MB/ms, 128 KB bounds
-	// scan preemption at ~100 µs.
+	// most this size. Since we can scan 1 MB/ms, 128 KB bounds
+	// scan preemption at 100 microseconds.
 	//
 	// This must be > _MaxSmallSize so that the object base is the
 	// span base.
@@ -32,7 +51,7 @@ const (
 
 	// drainCheckThreshold specifies how many units of work to do
 	// between self-preemption checks in gcDrain. Assuming a scan
-	// rate of 1 MB/ms, this is ~100 µs. Lower values have higher
+	// rate of 1 MB/ms, this is 100 microseconds. Lower values have higher
 	// overhead in the scan loop (the scheduler check may perform
 	// a syscall, so its overhead is nontrivial). Higher values
 	// make the system less responsive to incoming work.

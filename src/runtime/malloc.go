@@ -254,6 +254,15 @@ const (
 
 	pagesPerArena = heapArenaBytes / pageSize
 
+	// The heap is divided into cards, each of which has a 64 bit entry in
+	// the card table (see mheap.shardedCardTable).
+	// Larger cards increase the number of cards that will be scanned for
+	// mature pointers while smaller cards require more space. If cards are 1K
+	// then 8 bytes per hash is < 1% overhead.
+	// TODO(rlh): experiment and adjust this - perhaps 1K for 8K pages is not
+	// the best size.
+	cardBytes = 1024
+
 	// arenaL1Bits is the number of bits of the arena number
 	// covered by the first level arena map.
 	//

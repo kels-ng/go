@@ -197,7 +197,6 @@ type mheap struct {
 	}
 
 	_ uint32 // ensure 64-bit alignment of central
-
 	// central free lists for small size classes.
 	// the padding makes sure that the mcentrals are
 	// spaced CacheLinePadSize bytes apart, so that each mcentral.lock
@@ -291,6 +290,16 @@ type heapArena struct {
 	//
 	// Read atomically and written with an atomic CAS.
 	zeroedBase uintptr
+
+	// cardShards holds shards of card hashes, one hash for
+	// each card.
+	// A card is contained in a single span but a shard
+	// may contain mulitple adjacent spans within an arena.
+	// The card table is sharded so mature root scanning work
+	// packets can be performed in parallel and each packet
+	// has a small bounded amount of work.
+	// A large span may be divided into multiple shards.
+	cardShards [cardShardsPerArena]cardShard
 }
 
 // arenaHint is a hint for where to grow the heap arenas. See
