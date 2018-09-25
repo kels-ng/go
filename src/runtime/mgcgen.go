@@ -137,8 +137,8 @@ var gen = struct {
 	// generational when count % cycleModulus is 0
 	// Use counting as the heuristic to determine if the cycle is a full
 	// or generational cycle.
-	countBased:    true,
-	countBasedGen: true,
+	countBased:    false,
+	countBasedGen: false,
 	cycleModulus:  2,
 	// Avoid generational GC if cost of a full GC, as reported by
 	// memstats.gc_cpu_fraction is < highGCCostThreshold.
@@ -172,13 +172,95 @@ type cardStats struct {
 	ignoredCards         uintptr
 }
 
-// cardShard holds the information related to a shard
-// of cards. These are added to mheap.shardedCardTable under the
-// mheap lock when a new arena is added.
-// See mheap.shardedCardTable.
+// cardShard holds the information related to a shard of cards.
+// These are added to under the mheap lock when a new arena is added.
 type cardShard struct {
 	cardHashes [cardsPerShard]cardHash // The hashes in this shard.
 	shardBase  uintptr                 // pointer to where in the heap the first card starts
+}
+
+//
+// Card hashing is conservative in the sense that if the hash
+// does not match then the card needs to be scanned for potential mature to
+// young pointers. If the hashes match then the pointers haven't changed so
+// there will be no mature to young pointers.
+// If no mature to young pointers are found that is fine.
+//
+// For our purposes here we define a GC cycle as starting just after mark ends
+// and just before the sweeping begins.
+//
+// A new set of mark bits is allocated during the sweep if we in a full
+// GC cycle. If we are in a full GC cycle then cards are not scanned.
+//
+// GCCycleFull determines if this GC cycle is a full cycle.
+// No split to ensure write barrier is atomic w.r.t. GC.
+//
+// The heuristics used to decide if we should do a full GC favor doing
+// a full GC unless it is obvious that a generational GC has a good chance
+// of having a lower mark/cons ratio.
+//
+// Early in the application, typically during initialization we avoid
+// generational GC in favor of full GCs.
+//
+// If half the allocation space made available by the last GC is not available
+// then the next GC will be a full GC.
+//
+// The GC maintains a history of the mark/cons ratio for full and generational
+// cycles in an exponentially weighted moving average or EWMA.
+// If the full GC has a lower mark cons then we only attempt a generational
+// GC after many full GCs to see if the state of the heap has changed such that
+// generational GC is a win.
+//
+// TODO(rlh): There is a lot left to be done here. Currently this is a
+// bit ad-hoc and focused on testing the generational GC instead of
+// optimizing it.
+// nosplit since several of the callers are nosplit.
+//go:nosplit
+func isGCCycleFull() bool {
+	if !gcGen {
+		return true
+	}
+
+	if gen.spaceFull || gen.forceFullGC {
+		return true
+	}
+
+	// If full GC are taking a reasonable amount of time do not
+	// bother with a generational GC.
+	percentGCTime := int(memstats.gc_cpu_fraction * 100)
+	if percentGCTime < gen.highCostThreshold {
+		return true
+	}
+
+	// The next cycle will be full during warmup.
+	// Perhaps this should trigger as long as we are initializing which we can
+	// defined as a monotonic increase in heap size.
+	if gen.cycleCount < gen.warmupCount {
+		// number of warmup GC to do before considering a generational GC.
+		return true
+	}
+
+	if gen.countBased {
+		if gen.cycleCount%gen.cycleModulus == 0 {
+			return gen.countBasedGen
+		} else {
+			return !gen.countBasedGen
+		}
+	}
+
+	if work.fullRunCount >= work.fullSwitchCount {
+		// Do a generational GC at least every switchCount GCs.
+		return false
+	}
+
+	// Consider heuristics based on previous mark / cons ratios.
+	if work.fullMarkConsEWMA*1.1 < work.genMarkConsEWMA {
+		// This forces a generational GC as soon as warmup is over since work.genMarkConsEWMA is 0
+		return true
+	}
+
+	// Do a generational GC in the next cycle.
+	return false
 }
 
 // isMature takes a span and an object index and returns true if
