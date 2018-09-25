@@ -175,3 +175,9 @@ type cardShard struct {
 	cardHashes [cardsPerShard]cardHash // The hashes in this shard.
 	shardBase  uintptr                 // pointer to where in the heap the first card starts
 }
+
+func initCardShardBase(ha *heapArena, base uintptr) {
+	for i := 0; i < len(ha.cardShards); i++ {
+		ha.cardShards[i].shardBase = base + uintptr(cardShardBytes*i)
+	}
+}

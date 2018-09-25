@@ -761,7 +761,7 @@ mapped:
 				throw("out of memory allocating heap arena metadata")
 			}
 		}
-
+		initCardShardBase(r, arenaBase(arenaIdx(ri))) // arena and base
 		// Add the arena to the arenas list.
 		if len(h.allArenas) == cap(h.allArenas) {
 			size := 2 * uintptr(cap(h.allArenas)) * sys.PtrSize
