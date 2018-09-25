@@ -493,9 +493,7 @@ func (s *mspan) sweep(preserve bool) bool {
 	}
 
 	if gcGen {
-		// Immediately smash all memory available for allocation to induce
-		// errors earlier.
-		//s.zeroFreeSpanObjects() //TODO RLH switch this to malloc or when we get a span, theory being it acts like a prefetch.
+		// The theory being zeroing during the malloc will act as a prefetch.
 		s.needzero = 1
 	}
 

@@ -1822,8 +1822,8 @@ func gcMarkTermination(nextTriggerRatio float64) {
 						work.fullMarkConsEWMA = (markCons*.10 + work.fullMarkConsEWMA*.90)
 					}
 
-					if debug.gctrace > 0 {
-						println(" Finishing full cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
+					if debug.gctrace > 1 {
+						println(" ** Finishing full cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
 							"gen.spaceFull=", gen.spaceFull,
 							"fullSwitchCount=", work.fullSwitchCount,
 							"work.genMarkConsEWMA", work.genMarkConsEWMA,
@@ -1868,6 +1868,16 @@ func gcMarkTermination(nextTriggerRatio float64) {
 							}
 						}
 					}
+				}
+				if debug.gctrace > 1 {
+					println(" ** Finishing Gen  cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
+						"gen.spaceFull=", gen.spaceFull,
+						"fullSwitchCount=", work.fullSwitchCount,
+						"work.genMarkConsEWMA", work.genMarkConsEWMA,
+						"work.fullMarkConsEWMA", work.fullMarkConsEWMA,
+						"work.fullRunCount", work.fullRunCount,
+						"work.genRunCount", work.genRunCount,
+						"work.fullSwitchBase", work.fullSwitchBase, "Gen")
 				}
 			}
 		}
@@ -2004,7 +2014,7 @@ func gcMarkTermination(nextTriggerRatio float64) {
 			work.heap0>>20, "->", work.heap1>>20, "->", work.heap2>>20, " MB, ",
 			work.heapGoal>>20, " MB goal, ",
 			work.maxprocs, " P")
-		print(cycleType)
+		print(", ", cycleType)
 		if work.userForced {
 			print(" (forced)")
 		}

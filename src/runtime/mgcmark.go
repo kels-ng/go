@@ -444,7 +444,6 @@ func markrootMature(gcw *gcWork, shard int) {
 			throw("why markrootMature is gcphase == _GCoff")
 		}
 	}
-	return
 }
 
 // gcAssistAlloc performs GC work to make gp's assist debt positive.
