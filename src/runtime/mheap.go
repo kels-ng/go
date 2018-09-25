@@ -1281,8 +1281,15 @@ HaveSpan:
 		// Initialize mark and allocation structures.
 		s.freeindex = 0
 		s.allocCache = ^uint64(0) // all 1s indicating all free.
-		s.gcmarkBits = newMarkBits(s.nelems)
-		s.allocBits = newAllocBits(s.nelems)
+
+		// GenGC requirements
+		if isGCCycleFull() {
+			s.gcmarkBits = newMarkBits(s.nelems)
+			s.allocBits = newAllocBits(s.nelems)
+		} else {
+			s.allocBits = newAllocBits(s.nelems)
+			s.gcmarkBits = s.allocBits
+		}
 
 		// It's safe to access h.sweepgen without the heap lock because it's
 		// only ever updated with the world stopped and we run on the

@@ -150,7 +150,13 @@ func finishsweep_m() {
 	// point.
 	wakeScavenger()
 
-	nextMarkBitArenaEpoch()
+	// Call after full GC cycle but not during a generational GC
+	// since there a sticky bit maps being used for both allocation
+	// as well as marking.
+	if !gcGen || isGCCycleFull() {
+		// Doing a full gc so the current alloc bits are no longer of interest.
+		nextMarkBitArenaEpoch()
+	}
 }
 
 func bgsweep(c chan int) {
@@ -426,7 +432,10 @@ func (s *mspan) sweep(preserve bool) bool {
 				}
 			}
 			mbits.advance()
-			abits.advance()
+			if s.allocBits != s.gcmarkBits {
+				// Only advance if allocBits and gcmarkBits aren't the same due to generational GC.
+				abits.advance()
+			}
 		}
 	}
 
@@ -452,11 +461,13 @@ func (s *mspan) sweep(preserve bool) bool {
 	// Count the number of free objects in this span.
 	nalloc := uint16(s.countAlloc())
 	nfreed := s.allocCount - nalloc
-	if nalloc > s.allocCount {
-		// The zombie check above should have caught this in
-		// more detail.
-		print("runtime: nelems=", s.nelems, " nalloc=", nalloc, " previous allocCount=", s.allocCount, " nfreed=", nfreed, "\n")
-		throw("sweep increased allocation count")
+	if !gcGen {
+		if nalloc > s.allocCount {
+			// The zombie check above should have caught this in
+			// more detail.
+			print("runtime: nelems=", s.nelems, " nalloc=", nalloc, " previous allocCount=", s.allocCount, " nfreed=", nfreed, "\n")
+			throw("sweep increased allocation count")
+		}
 	}
 
 	s.allocCount = nalloc
@@ -465,10 +476,28 @@ func (s *mspan) sweep(preserve bool) bool {
 		getg().m.p.ptr().traceReclaimed += uintptr(nfreed) * s.elemsize
 	}
 
-	// gcmarkBits becomes the allocBits.
-	// get a fresh cleared gcmarkBits in preparation for next GC
-	s.allocBits = s.gcmarkBits
-	s.gcmarkBits = newMarkBits(s.nelems)
+	if s.allocBits != s.gcmarkBits {
+		s.allocBits = s.gcmarkBits
+	}
+
+	// Generational GC uses the allocBits as the sticky bits for
+	// and then discards them with the above
+	// statement. To turn on generational GC minor GC cycles need
+	// to start with the allocBits as the gcmarkBits.
+	if !gcGen || isGCCycleFull() {
+		// Since all spans are swept between GCs this is where we set up the
+		// mark bits for the next GC.
+		// Set up cleared mark bits if the next GC is a full GC.
+		// Otherwise the mark bits are sticky and the same as the alloc bits.
+		s.gcmarkBits = newMarkBits(s.nelems)
+	}
+
+	if gcGen {
+		// Immediately smash all memory available for allocation to induce
+		// errors earlier.
+		//s.zeroFreeSpanObjects() //TODO RLH switch this to malloc or when we get a span, theory being it acts like a prefetch.
+		s.needzero = 1
+	}
 
 	// Initialize alloc bits cache.
 	s.refillAllocCache(0)
@@ -669,5 +698,55 @@ func clobberfree(x unsafe.Pointer, size uintptr) {
 	// size (span.elemsize) is always a multiple of 4.
 	for i := uintptr(0); i < size; i += 4 {
 		*(*uint32)(add(x, i)) = 0xdeadbeef
+	}
+}
+
+// spanSwept return true if the span has been swept otherwise
+// returns false.
+func (s *mspan) spanSwept() bool {
+	gen := atomic.Load(&s.sweepgen)
+	return gen == mheap_.sweepgen || gen == mheap_.sweepgen+3
+}
+
+// If the GC is being forced by the application, for example with runtime.GC()
+// then ensure that all the spans have a fresh clean set of mark bits.
+// The sweeping is done for this cycle so sg==sg
+func allocFreshMarkBits() {
+	for _, s := range mheap_.allspans {
+		if s.state.get() != mSpanInUse {
+			continue
+		}
+		if !s.spanSwept() {
+			print("runtime: s.sweepgen=", s.sweepgen, " mheap_.sweepgen=", mheap_.sweepgen)
+			throw("all spans should have been swept")
+		}
+		if s.gcmarkBits == s.allocBits {
+			s.gcmarkBits = newMarkBits(s.nelems)
+		}
+	}
+}
+
+//
+func checkAllocBits() {
+	for i, s := range mheap_.allspans {
+		if s.state.get() != mSpanInUse {
+			continue
+		}
+		if !s.spanSwept() {
+			print("s.sweepgen=", s.sweepgen, " mheap_.sweepgen=", mheap_.sweepgen)
+			throw("all spans should have been swept.")
+		}
+		if isGCCycleFull() {
+			if s.gcmarkBits == s.allocBits {
+				throw("why is s.gcmarkBits == s.allocBits")
+			}
+		} else {
+			if s.gcmarkBits != s.allocBits {
+				println("runtime: s=", s, "index i=", i, " s.state =", mSpanStateNames[s.state.get()], "s.gcmarkBits = ", s.gcmarkBits,
+					"s.allocBits=", s.allocBits, "s.nelems=", s.nelems, "s.base()=", hex(s.base()),
+					"s.elemsize=", s.elemsize, "s.spanclass.noscan()", s.spanclass.noscan())
+				// throw("why s.gcmarkBits != s.allocBits")
+			}
+		}
 	}
 }

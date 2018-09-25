@@ -1404,11 +1404,42 @@ func gcStart(trigger gcTrigger) {
 	// Finish sweep before we start concurrent scan.
 	systemstack(func() {
 		finishsweep_m()
+		// If this GC was work.userForced then we should do a full GC instead of a generational GC.
+		// The gcMarkBits are set up during the span sweeping. If the sweeper thought the next GC
+		// was going to be a generation GC then it shared the gcAllocBits with the gcMarkBits. This
+		// will require that fresh gcMarkBits need to be set up before the GC can continue.
+
+		// Inform isGCCycleFull that this is a forced GC.
+		// reverted
+		if !isGCCycleFull() && work.userForced {
+			allocFreshMarkBits()
+			gen.forceFullGC = true
+		} else {
+			// expensive check
+			if gcGenDebug {
+				checkAllocBits()
+			}
+		}
 	})
 
 	// clearpools before we start the GC. If we wait they memory will not be
 	// reclaimed until the next GC cycle.
 	clearpools()
+
+	if gcGen {
+		// The world is stopped. There are values in each P's wbBuf.buf
+		// that need to be drained to the card table for generational GC.
+		// wbBufFlush1 knows that if gcstatus is _GCoff then it is
+		// draining the buffers to card table.
+		if atomic.Load(&gcphase) != _GCoff {
+			throw("draining buffers but gcphase is not _GCoff")
+		}
+		systemstack(func() {
+			for _, p := range allp {
+				wbBufFlush1(p)
+			}
+		})
+	}
 
 	work.cycles++
 
