@@ -4,6 +4,11 @@
 
 package runtime
 
+import (
+	"runtime/internal/sys"
+	"unsafe"
+)
+
 // Generational GC
 //
 // Go uses a sticky bit approach to implement generational
@@ -174,6 +179,246 @@ type cardStats struct {
 type cardShard struct {
 	cardHashes [cardsPerShard]cardHash // The hashes in this shard.
 	shardBase  uintptr                 // pointer to where in the heap the first card starts
+}
+
+// isMature takes a span and an object index and returns true if
+// the object at that index is marked and therefore mature because it
+// survived the previous GC cycle.
+// This function is only used during the mark phase of a generational
+// cycle since it depends on the previous sweep ensuring the stickiness.
+// of gcmarkBits.
+func (s *mspan) isMature(objIndex uintptr) bool {
+	if s.allocBits == nil {
+		// new span created since start of GC so return false
+		return false
+	}
+	bytep, mask := s.gcmarkBits.bitp(objIndex)
+	return *bytep&mask != 0
+}
+
+// hashMatureCard returns the hash of the pointers in the mature
+// objects found in the range [cardStart, cardEnd). This range
+// must specify a single card and depends on the property that cards
+// are contained in a single span.
+func (s *mspan) hashMatureCard(cardStart, cardEnd uintptr) cardHash {
+	hash := gen.hashCardSeed
+	if s.allocBits == nil {
+		return hash
+	}
+	if cardEnd > s.limit {
+		// Do not consider info past the end of the span.
+		// Cards can not overlap spans.
+		cardEnd = s.limit
+	}
+	index := s.objIndex(cardStart)
+	for objIndx, objStart := index, s.base()+index*s.elemsize; objStart < cardEnd; objIndx, objStart = objIndx+1, objStart+s.elemsize {
+		if s.isMature(objIndx) {
+			start := objStart
+			end := objStart + s.elemsize
+			if start < cardStart {
+				start = cardStart
+			}
+			if end > cardEnd {
+				end = cardEnd
+			}
+			hash = hashPointers(start, end, hash)
+		}
+	}
+	return hash
+}
+
+// promoteMatureCardPtrs promotes all objects referenced from mature objects
+// in the range [cardStart, cardEnd).
+func (s *mspan) promoteMatureCardPtrs(cardStart, cardEnd uintptr) {
+	if cardEnd > s.limit {
+		// Do not consider info past the end of the span.
+		// Cards can not overlap spans.
+		cardEnd = s.limit
+	}
+	index := s.objIndex(cardStart)
+	for objIndx, objStart := index, s.base()+index*s.elemsize; objStart < cardEnd; objIndx, objStart = objIndx+1, objStart+s.elemsize {
+		if s.isMature(objIndx) {
+			start := objStart
+			end := objStart + s.elemsize
+			if start < cardStart {
+				start = cardStart
+			}
+			if end > cardEnd {
+				end = cardEnd
+			}
+			// Pass at most one object at a time.
+			transitivelyPromoteReferents(start, end)
+		}
+	}
+}
+
+// The block being hashed will be within a single object so once
+// we see a no-more-pointers in the pointer bit map we can return the
+// hash immediately. Since start may not be at the start of an object
+// we need to be conservative and not check for the no-more-pointers
+// in the first 2 slots.
+func hashPointers(start, end uintptr, seed cardHash) cardHash {
+	// pointer map.
+	hbits := heapBitsForAddr(start)
+	for slot := start; slot < end; slot += sys.PtrSize {
+		// Find bits for this word.
+		if slot != start {
+			// Avoid needless hbits.next() on last iteration.
+			hbits = hbits.next()
+		}
+		// Load bits once. See CL 22712 and issue 16973 for discussion.
+		bits := hbits.bits()
+		// During checkmarking, 1-word objects store the checkmark
+		// in the type bit for the one word. The only one-word objects
+		// are pointers, or else they'd be merged with other non-pointer
+		// data into larger allocations.
+		// start may not be to the start of an object so this is overly conservative
+		// resulting in another harmless iteration.
+		if slot != start && slot != start+1*sys.PtrSize && bits&bitScan == 0 {
+			break // no more pointers in this object
+		}
+		if bits&bitPointer == 0 {
+			continue // not a pointer
+		}
+		seed = cardHash(memhash64(unsafe.Pointer(slot), uintptr(seed)))
+	}
+	return seed
+}
+
+// Promote referents in between start and end. [start, end)
+// is contained in a single object. Knowing that start is the
+// only place an object can start is needed to properly parse the mark bits.
+// If an object overlaps a card boundary then only promote referents between
+// [start, end). Finally transitively promote all reachable
+// young objects.
+func transitivelyPromoteReferents(start, end uintptr) {
+	// pointer map.
+	hbits := heapBitsForAddr(start)
+	for slot := start; slot < end; slot += sys.PtrSize {
+		// Find bits for this word.
+		if slot != start {
+			// Avoid needless hbits.next() on last iteration.
+			hbits = hbits.next()
+		}
+		// Load bits once. See CL 22712 and issue 16973 for discussion.
+		bits := hbits.bits()
+		// During checkmarking, 1-word objects store the checkmark
+		// in the type bit for the one word. The only one-word objects
+		// are pointers, or else they'd be merged with other non-pointer
+		// data into larger allocations.
+		// start may not be to the start of an object so this is overly conservative
+		// resulting in another harmless iteration.
+		if slot != start && slot != start+1*sys.PtrSize && bits&bitScan == 0 {
+			break // no more pointers in this object
+		}
+		if bits&bitPointer == 0 {
+			continue // this slot is not a pointer
+		}
+		// promote the referent.
+		// Determine if the source object is a mature object.
+		// Ignore slots that are not in mature objects since they may not be valid.
+		// Furthermore they are uninteresting w.r.t. generational GC.
+		obj := *(*uintptr)(unsafe.Pointer(slot))
+		if !inheap(obj) {
+			continue
+		}
+		mbits := markBitsForAddr(obj)
+		if !mbits.isMarked() {
+			shade(obj) // Transitively promote all reachable young object.
+		}
+	}
+}
+
+// processCardShard iterates through the cards in shard n.
+// It hashes the pointers in each card in the shard and if the previous
+// and the current hashes do not match then the card potentially contains
+// a mature to young pointer. Look at each mature pointer and if it points
+// to a young object then promote the young referent.
+// nowritebarrier because gcDrain and gcDrainN are
+// and it calls markroot is nowritebarrier
+// and it calls markrootMature which is nowritebarrier
+// and it calls processCardShard
+// TODO(rlh): Considering using go:nowritebarrierrec instead
+//go:nowritebarrier
+func processCardShard(n int) {
+	trace := false
+	allArenaIndex := n / cardShardsPerArena
+	if trace {
+		println("allArenaIndex=", allArenaIndex, "n=", n, "cardShardsPerArena=", cardShardsPerArena)
+	}
+	arenaIndex := mheap_.allArenas[allArenaIndex]
+	heapArena := mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()]
+	shardIndex := n % cardShardsPerArena
+	if trace {
+		println("arenaIndex.l1()=", arenaIndex.l1(), "arenaIndex.l2()=", arenaIndex.l2(),
+			"len(mheap_.allArenas)=", len(mheap_.allArenas),
+			"len(mheap_.arenas[arenaIndex.l1()]", len(mheap_.arenas[arenaIndex.l1()]),
+			"mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()]", mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()])
+
+		if heapArena == nil {
+			println("!!! heapArena is nil")
+		}
+		println("shardIndex=", shardIndex, "heapArena=", heapArena)
+		println("&heapArena.cardShards", &heapArena.cardShards)
+	}
+	shard := &heapArena.cardShards[shardIndex]
+	shardBase := shard.shardBase
+
+	for i, oldHash := range shard.cardHashes {
+		// Shards can contain parts of more than one span
+		// Shards can not contain parts of more than one arena.
+		// Cards can not contain parts of more than one page or span.
+		// Make sure this card is actually in a span that might hold
+		// mature pointers.
+		cardStart := shardBase + uintptr(i*cardBytes)
+		if !inheap(cardStart) {
+			continue
+		}
+		span := spanOf(cardStart)
+		if span.state.get() != mSpanInUse {
+			continue // cards do not span spans so entire card is in this span.
+		}
+
+		if cardStart < span.base() || cardStart > span.limit {
+			// This is an indication that we have a span that
+			// has an inconsistant (or at least not understood)
+			// state. It is mSpanInUse, and it is in the inheap but
+			// clearly the address we used to reach the span
+			// structure got us to the wrong structure.
+			println("runtime: span.state=", mSpanStateNames[span.state.get()],
+				" cardStart (", cardStart, ") < span.base() (", span.base(), ") || cardStart > span.limit (", span.limit, ")")
+			throw("inconsistant span metadata")
+		}
+		if span.gcmarkBits == nil {
+			// This is a benign race condition caused by a span
+			// being initialized or merged with another unused span.
+			// If this span doesn't have any mark bits then
+			// it was created since the start of this GC cycle
+			// and has no mature objects.
+			// This seems a bit hacky, like if it doesn't have
+			// any mark bits how do we mark objects in it as
+			// reachable. We know the state is _MSpanInUse
+			// from above. There is a brief moment during
+			// the creation of the span that the state is set
+			// to _MSpanInUse and then immediately freed.
+			continue
+		}
+		if span.spanclass.noscan() {
+			continue
+		}
+		if span.nelems == 0 {
+			// span has no elements in it. This can happen
+			// during initialization, see grow().
+			continue
+		}
+
+		cardEnd := cardStart + cardBytes
+		hash := span.hashMatureCard(cardStart, cardEnd) // Expensive since it recalculates the arena.
+		if hash != oldHash {
+			span.promoteMatureCardPtrs(cardStart, cardEnd)
+			shard.cardHashes[i] = hash
+		}
+	}
 }
 
 func initCardShardBase(ha *heapArena, base uintptr) {

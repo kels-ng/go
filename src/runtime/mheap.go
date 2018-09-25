@@ -968,6 +968,35 @@ func (h *mheap) setSpans(base, npage uintptr, s *mspan) {
 	}
 }
 
+// setSpansNil modifies the span map so [spanOf(base), spanOf(base+npage*pageSize))
+// is s.
+func (h *mheap) setSpansNil(base, npage uintptr) {
+	p := base / pageSize
+	ai := arenaIndex(base)
+	ha := h.arenas[ai.l1()][ai.l2()]
+	start := p % pagesPerArena // which page to start at in ha
+	end := start + npage       // [start, end)
+	for end >= pagesPerArena {
+		npageInHA := pagesPerArena - start          // pages in ha to clear.
+		spansToNil := ha.spans[start:pagesPerArena] // slice of spans to clear.
+		// Compiler should optimize to memclrNoHeapPointers(&spansToNil[0], len(spansToNil)*sys.PtrSize)
+		for i := range spansToNil {
+			spansToNil[i] = nil
+		}
+		npage = npage - npageInHA // pages left to clear
+		end = npage
+		start = 0
+		ai++
+		ha = h.arenas[ai.l1()][ai.l2()]
+	}
+	if npage > 0 {
+		spansToNil := ha.spans[start : start+npage]
+		for i := range spansToNil {
+			spansToNil[i] = nil
+		}
+	}
+}
+
 // allocNeedsZero checks if the region of address space [base, base+npage*pageSize),
 // assumed to be allocated, needs to be zeroed, updating heap arena metadata for
 // future allocations.
@@ -1423,7 +1452,7 @@ func (h *mheap) freeSpan(s *mspan) {
 			bytes := s.npages << _PageShift
 			msanfree(base, bytes)
 		}
-		h.freeSpanLocked(s, spanAllocHeap)
+		h.freeSpanLocked(s, spanAllocHeap, false)
 		unlock(&h.lock)
 	})
 }
@@ -1442,11 +1471,11 @@ func (h *mheap) freeSpan(s *mspan) {
 func (h *mheap) freeManual(s *mspan, typ spanAllocType) {
 	s.needzero = 1
 	lock(&h.lock)
-	h.freeSpanLocked(s, typ)
+	h.freeSpanLocked(s, typ, false)
 	unlock(&h.lock)
 }
 
-func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
+func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType, trimmed bool) {
 	assertLockHeld(&h.lock)
 
 	switch s.state.get() {
@@ -1466,6 +1495,19 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 		atomic.And8(&arena.pageInUse[pageIdx], ^pageMask)
 	default:
 		throw("mheap.freeSpanLocked - invalid span state")
+	}
+
+	// When s.npages is > 2 there are entries in the middle of the span and these need to
+	// be cleared (set to nil).
+	//
+	// At this point any access will get a valid span at the ends and nil if in the middle.
+	//
+	// h is locked so the unlock will act as a publishing store.
+	//
+	// If the span was trimmed off an already free span then we know the interior
+	// mheap_.spans entries are already nil.
+	if gcGen && s.npages > 2 && !trimmed {
+		mheap_.setSpansNil(s.base()+pageSize, s.npages-2)
 	}
 
 	// Update stats.

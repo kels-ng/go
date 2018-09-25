@@ -226,6 +226,8 @@ func (s *mspan) isFree(index uintptr) bool {
 	return *bytep&mask == 0
 }
 
+// objIndex returns the index of object p in span s.
+// Does not check for whether p is in the span.
 func (s *mspan) objIndex(p uintptr) uintptr {
 	byteOffset := p - s.base()
 	if byteOffset == 0 {

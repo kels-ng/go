@@ -194,6 +194,7 @@ func gcinit() {
 	lockInit(&work.sweepWaiters.lock, lockRankSweepWaiters)
 	lockInit(&work.assistQueue.lock, lockRankAssistQueue)
 	lockInit(&work.wbufSpans.lock, lockRankWbufSpans)
+	gen.hashCardSeed = cardHash(nanotime())
 }
 
 func readgogc() int32 {
