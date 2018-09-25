@@ -2101,9 +2101,12 @@ func gcMark(start_time int64) {
 	}
 	work.tstart = start_time
 
+	if !gcGen && work.nMatureRoots != 0 {
+		throw("!gcGen && work.nMatureRoots != 0")
+	}
 	// Check that there's no marking work remaining.
 	if work.full != 0 || work.markrootNext < work.markrootJobs {
-		print("runtime: full=", hex(work.full), " next=", work.markrootNext, " jobs=", work.markrootJobs, " nDataRoots=", work.nDataRoots, " nBSSRoots=", work.nBSSRoots, " nSpanRoots=", work.nSpanRoots, " nStackRoots=", work.nStackRoots, "\n")
+		print("runtime: full=", hex(work.full), " next=", work.markrootNext, " jobs=", work.markrootJobs, " nDataRoots=", work.nDataRoots, " nBSSRoots=", work.nBSSRoots, " nSpanRoots=", work.nSpanRoots, " nStackRoots=", work.nStackRoots, "nMatureRoots=", work.nMatureRoots, "\n")
 		panic("non-empty mark queue after concurrent mark")
 	}
 

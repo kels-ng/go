@@ -115,6 +115,21 @@ func gcMarkRootPrepare() {
 	mheap_.markArenas = mheap_.allArenas[:len(mheap_.allArenas):len(mheap_.allArenas)]
 	work.nSpanRoots = len(mheap_.markArenas) * (pagesPerArena / pagesPerSpanRoot)
 
+	// Scan cards potentially holding roots into the young generation.
+	// The work is divided into work.nMatureRoots pieces
+	// so the entire job won't be ingested all at once.
+	// Full cycle GCs collect the mature areas so nMatureRoots is
+	// set to 0, which acts as a noop as far as the markroot routine
+	// is concerned.
+	if gcGen {
+		if !isGCCycleFull() {
+			work.nMatureRoots = len(mheap_.allArenas) * cardShardsPerArena
+		} else {
+			// 0 will noop the scanning of ther roots in mature space.
+			work.nMatureRoots = 0
+		}
+	}
+
 	// Scan stacks.
 	//
 	// Gs may be created after this point, but it's okay that we
@@ -124,7 +139,8 @@ func gcMarkRootPrepare() {
 	work.nStackRoots = int(atomic.Loaduintptr(&allglen))
 
 	work.markrootNext = 0
-	work.markrootJobs = uint32(fixedRootCount + work.nFlushCacheRoots + work.nDataRoots + work.nBSSRoots + work.nSpanRoots + work.nStackRoots)
+	work.markrootJobs = uint32(fixedRootCount + work.nFlushCacheRoots + work.nDataRoots +
+		work.nBSSRoots + work.nSpanRoots + work.nMatureRoots + work.nStackRoots)
 }
 
 // gcMarkRootCheck checks that all roots have been scanned. It is
@@ -171,7 +187,8 @@ func markroot(gcw *gcWork, i uint32) {
 	baseData := baseFlushCache + uint32(work.nFlushCacheRoots)
 	baseBSS := baseData + uint32(work.nDataRoots)
 	baseSpans := baseBSS + uint32(work.nBSSRoots)
-	baseStacks := baseSpans + uint32(work.nSpanRoots)
+	baseMature := baseSpans + uint32(work.nSpanRoots)
+	baseStacks := baseMature + uint32(work.nMatureRoots) // for noop set nMatureRoots to 0
 	end := baseStacks + uint32(work.nStackRoots)
 
 	// Note: if you add a case here, please also update heapdump.go:dumproots.
@@ -199,17 +216,19 @@ func markroot(gcw *gcWork, i uint32) {
 		// Switch to the system stack so we can call
 		// stackfree.
 		systemstack(markrootFreeGStacks)
-
-	case baseSpans <= i && i < baseStacks:
+	case baseSpans <= i && i < baseMature:
 		// mark mspan.specials
 		markrootSpans(gcw, int(i-baseSpans))
-
+	case baseMature <= i && i < baseStacks:
+		// mark young objects pointed to by mature objects
+		markrootMature(gcw, int(i-baseMature))
 	default:
 		// the rest is scanning goroutine stacks
 		var gp *g
 		if baseStacks <= i && i < end {
 			gp = allgs[i-baseStacks]
 		} else {
+			println("runtime: i=", i, "baseSpans=", baseSpans, "baseMature=", baseMature, "work.nMatureRoots", work.nMatureRoots)
 			throw("markroot: bad index")
 		}
 
@@ -399,6 +418,35 @@ func markrootSpans(gcw *gcWork, shard int) {
 	}
 }
 
+// markrootMature marks roots for a shard of cards.
+//go:nowritebarrier
+func markrootMature(gcw *gcWork, shard int) {
+	// Generation GC requires that mature objects in marked
+	// cards are scanned for pointers into the young generation.
+
+	// TODO(austin): There are several ideas for making this more
+	// efficient in issue #11485.
+	if gcGenDebug {
+		if atomic.Load(&gcphase) == _GCoff {
+			throw("why markrootMature is gcphase == _GCoff")
+		}
+		if atomic.Load(&gcphase) == _GCoff {
+			throw("why markrootMature is gcphase == _GCoff")
+		}
+		if !gcGen {
+			throw("gcGen is false.")
+		}
+	}
+
+	processCardShard(shard)
+	if gcGenDebug {
+		if atomic.Load(&gcphase) == _GCoff {
+			throw("why markrootMature is gcphase == _GCoff")
+		}
+	}
+	return
+}
+
 // gcAssistAlloc performs GC work to make gp's assist debt positive.
 // gp must be the calling user gorountine.
 //
@@ -427,7 +475,6 @@ retry:
 		scanWork = gcOverAssistWork
 		debtBytes = int64(assistBytesPerWork * float64(scanWork))
 	}
-
 	// Steal as much credit as we can from the background GC's
 	// scan credit. This is racy and may drop the background
 	// credit below 0 if two mutators steal at the same time. This
@@ -1159,7 +1206,6 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 			break
 		}
 		scanobject(b, gcw)
-
 		// Flush background scan work credit.
 		if gcw.scanWork >= gcCreditSlack {
 			atomic.Xaddint64(&gcController.scanWork, gcw.scanWork)
@@ -1167,7 +1213,6 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 			gcw.scanWork = 0
 		}
 	}
-
 	// Unlike gcDrain, there's no need to flush remaining work
 	// here because this never flushes to bgScanCredit and
 	// gcw.dispose will flush any remaining work to scanWork.
