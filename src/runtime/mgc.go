@@ -189,6 +189,9 @@ func gcinit() {
 	// and set the GC trigger and goal.
 	_ = setGCPercent(readgogc())
 
+	// Read Generational GC parameters
+	readgogcgen()
+
 	work.startSema = 1
 	work.markDoneSema = 1
 	lockInit(&work.sweepWaiters.lock, lockRankSweepWaiters)
@@ -206,6 +209,20 @@ func readgogc() int32 {
 		return n
 	}
 	return 100
+}
+
+func readgogcgen() {
+	switch gogetenv("GOGCMODE") {
+	case "gen":
+		gcGen = true
+		gcGenDebug = false
+	case "gen_debug":
+		gcGen = true
+		gcGenDebug = true
+	default:
+		gcGen = false
+		gcGenDebug = false
+	}
 }
 
 // gcenable is called after the bulk of the runtime initialization,
@@ -234,7 +251,8 @@ func setGCPercent(in int32) (out int32) {
 		gcpercent = in
 		heapminimum = defaultHeapMinimum * uint64(gcpercent) / 100
 		// Update pacing in response to gcpercent change.
-		gcSetTriggerRatio(memstats.triggerRatio, isGCCycleFull())
+		gen.forceFullGC = true
+		gcSetTriggerRatio(memstats.triggerRatio, true)
 		unlock(&mheap_.lock)
 	})
 
@@ -1408,6 +1426,18 @@ func gcStart(trigger gcTrigger) {
 		}
 	}
 
+	// If this GC was work.userForced then we should do a full GC instead of a generational GC.
+	// The gcMarkBits are set up during the span sweeping. If the sweeper thought the next GC
+	// was going to be a generation GC then it shared the gcAllocBits with the gcMarkBits. This
+	// will require that fresh gcMarkBits need to be set up before the GC can continue.
+	systemstack(func() {
+		// Inform isGCCycleFull that this is a forced GC.
+		// reverted
+		if !isGCCycleFull() && work.userForced {
+			gen.forceFullGC = true
+		}
+	})
+
 	gcBgMarkStartWorkers()
 
 	systemstack(gcResetMarkState)
@@ -1432,21 +1462,10 @@ func gcStart(trigger gcTrigger) {
 	// Finish sweep before we start concurrent scan.
 	systemstack(func() {
 		finishsweep_m()
-		// If this GC was work.userForced then we should do a full GC instead of a generational GC.
-		// The gcMarkBits are set up during the span sweeping. If the sweeper thought the next GC
-		// was going to be a generation GC then it shared the gcAllocBits with the gcMarkBits. This
-		// will require that fresh gcMarkBits need to be set up before the GC can continue.
 
-		// Inform isGCCycleFull that this is a forced GC.
-		// reverted
-		if !isGCCycleFull() && work.userForced {
-			allocFreshMarkBits()
-			gen.forceFullGC = true
-		} else {
-			// expensive check
-			if gcGenDebug {
-				checkAllocBits()
-			}
+		// expensive check
+		if gcGenDebug {
+			checkAllocBits()
 		}
 	})
 
@@ -1454,20 +1473,17 @@ func gcStart(trigger gcTrigger) {
 	// reclaimed until the next GC cycle.
 	clearpools()
 
-	if gcGen {
-		// The world is stopped. There are values in each P's wbBuf.buf
-		// that need to be drained to the card table for generational GC.
-		// wbBufFlush1 knows that if gcstatus is _GCoff then it is
-		// draining the buffers to card table.
-		if atomic.Load(&gcphase) != _GCoff {
-			throw("draining buffers but gcphase is not _GCoff")
-		}
-		systemstack(func() {
-			for _, p := range allp {
-				wbBufFlush1(p)
-			}
-		})
-	}
+	// if gcGen {
+	// 	// The world is stopped. There are values in each P's wbBuf.buf
+	// 	// that need to be drained to the card table for generational GC.
+	// 	// wbBufFlush1 knows that if gcstatus is _GCoff then it is
+	// 	// draining the buffers to card table.
+	// 	systemstack(func() {
+	// 		for _, p := range allp {
+	// 			wbBufFlush1(p)
+	// 		}
+	// 	})
+	// }
 
 	work.cycles++
 
@@ -1711,15 +1727,15 @@ top:
 // disabled.
 func gcMarkTermination(nextTriggerRatio float64) {
 	// World is stopped
-	cycleType := "Full"
-	fullCycle := isGCCycleFull()
+	var cycleType string
+	var fullCycle bool
 
-	if !isGCCycleFull() {
+	if isGCCycleFull() {
+		cycleType = "Full"
+		fullCycle = true
+	} else {
 		cycleType = "Gen"
-	}
-
-	if !gcGen {
-		cycleType = ""
+		fullCycle = false
 	}
 
 	// Start marktermination (write barrier remains enabled for now).
@@ -1753,9 +1769,6 @@ func gcMarkTermination(nextTriggerRatio float64) {
 	})
 
 	systemstack(func() {
-		if fullCycle {
-			rehashCards()
-		}
 		work.heap2 = work.bytesMarked
 		if debug.gccheckmark > 0 {
 			// Run a full non-parallel, stop-the-world
@@ -1771,122 +1784,13 @@ func gcMarkTermination(nextTriggerRatio float64) {
 			endCheckmarks()
 		}
 
-		// marking is complete so we can turn the write barrier off
-		// isGCCycleFull always assumes the GC is not forced.
-		if gen.forceFullGC {
-			gen.forceFullGC = false
-		}
-
-		gen.cycleCount++
-
-		gcSetTriggerRatio(nextTriggerRatio, fullCycle)
-		var mark, cons, markCons float64
-
-		if !work.userForced {
-			now := nanotime()
-			sweepTermCpu := int64(work.stwprocs) * (work.tMark - work.tSweepTerm)
-			// We report idle marking time below, but omit it from the
-			// overall utilization here since it's "free".
-			markTermCpu := int64(work.stwprocs) * (now - work.tMarkTerm)
-			// Forced GCs do not participate in the decision to run generational GCs.
-			mark = float64(sweepTermCpu + gcController.assistTime + gcController.dedicatedMarkTime + gcController.fractionalMarkTime +
-				gcController.idleMarkTime + markTermCpu) // Cost of the work in ms done in this cycle.
-			mark = mark / 1000.0
-			cons = float64(work.heap1-work.heap2) / float64(1<<20) // Amount of heap in MB freed up by this cycle, the cons of the mark/cons ratio.
-			if work.heap1 <= work.heap2 {
-				cons = .001 // 1Kbyte minimum.
-			}
-			markCons = mark / cons
-			if gcGenDebug && markCons < 0.0 {
-				println("markCons=", markCons, "work.stwprocs=", work.stwprocs, "work.tEnd=", work.tEnd, " work.tMarkTerm", work.tMarkTerm,
-					"\n      sweepTermCpu= ", sweepTermCpu, " markTermCpu= ", markTermCpu, " mark= ", mark, " cons= ", cons, " work.fullMarkConsEWMA= ", work.fullMarkConsEWMA)
-				throw("markCons should never be negative.")
-			}
-			if work.fullSwitchCount == 0 {
-				if work.fullSwitchBase == 0 {
-					work.fullSwitchBase = 8
-				}
-				work.fullSwitchCount = work.fullSwitchBase
-			}
-			if fullCycle {
-				// isGCCycleFull() now refers to next cycle so use fullCycle.
-				// update fullMarkConsEWMA.
-				if work.fullMarkConsEWMA == 0.0 {
-					// uninitialized so no history set to markCons
-					work.fullMarkConsEWMA = markCons
-				} else {
-					// update the weighted decaying average (EWMA)
-					if markCons > 1.5*work.fullMarkConsEWMA {
-						work.fullMarkConsEWMA = (markCons*.05 + work.fullMarkConsEWMA*.95)
-					} else {
-						work.fullMarkConsEWMA = (markCons*.10 + work.fullMarkConsEWMA*.90)
-					}
-
-					if debug.gctrace > 1 {
-						println(" ** Finishing full cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
-							"gen.spaceFull=", gen.spaceFull,
-							"fullSwitchCount=", work.fullSwitchCount,
-							"work.genMarkConsEWMA", work.genMarkConsEWMA,
-							"work.fullMarkConsEWMA", work.fullMarkConsEWMA,
-							"work.fullRunCount", work.fullRunCount,
-							"work.genRunCount", work.genRunCount,
-							"work.fullSwitchBase", work.fullSwitchBase)
-					}
-				}
-				work.genRunCount = 0
-				work.fullRunCount++
-			} else {
-				// Generational cycle
-				// update genMarkConsEWMA.
-				if work.genMarkConsEWMA == 0.0 {
-					// not initialized, set to markCons
-					work.genMarkConsEWMA = markCons
-				} else {
-					// EWMA weighted diminishing average. sum of relative contributions must be 1.
-					work.genMarkConsEWMA = (markCons*.10 + work.genMarkConsEWMA*.90)
-				}
-				work.fullRunCount = 0
-				work.genRunCount++
-				if markCons > work.fullMarkConsEWMA {
-					// The cost of this generational GC is greater than that of the EWMA of a full GC.
-					// Make the next cycle a full GC.
-					if work.genRunCount == 1 {
-						// Even the first generation GC didn't help delay trying again a bit.
-						if work.fullSwitchCount < work.fullSwitchBase*8 {
-							work.fullSwitchCount += work.fullSwitchBase
-						}
-					}
-				} else {
-					if work.genMarkConsEWMA > work.fullMarkConsEWMA {
-						if work.fullSwitchBase < 1 {
-							work.fullSwitchBase = 8
-						}
-						if work.genRunCount == 1 {
-							// Even the first generation GC didn't help delay trying again a bit.
-							if work.fullSwitchCount < work.fullSwitchBase*8 {
-								work.fullSwitchCount += work.fullSwitchBase
-							}
-						}
-					}
-				}
-				if debug.gctrace > 1 {
-					println(" ** Finishing Gen  cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
-						"gen.spaceFull=", gen.spaceFull,
-						"fullSwitchCount=", work.fullSwitchCount,
-						"work.genMarkConsEWMA", work.genMarkConsEWMA,
-						"work.fullMarkConsEWMA", work.fullMarkConsEWMA,
-						"work.fullRunCount", work.fullRunCount,
-						"work.genRunCount", work.genRunCount,
-						"work.fullSwitchBase", work.fullSwitchBase, "Gen")
-				}
-			}
-		}
-
+		setGenGcTrigger(fullCycle)
 		// ------------
 		// W.R.T generational GC this is where a new GC cycle starts. Since no span has been swept yet
 		// it will observe that it is in this new GC cycle and set up the mark bits accordingly.
 		// ------------
 
+		// marking is complete so we can turn the write barrier off
 		setGCPhase(_GCoff)
 		gcSweep(work.mode)
 	})
@@ -2552,21 +2456,4 @@ func fmtNSAsMS(buf []byte, ns uint64) []byte {
 		dec--
 	}
 	return itoaDiv(buf, x, dec)
-}
-
-// The GC is near completion. There are no gray objects so therefore no
-// reachable white objects. All objects have their mark/mature bit set correctly.
-// The write barrier is on so we are allocating black/mature objects. There is no
-// way that a white pointer can be written into the heap.
-// This means that we can rehash all of the cards provided we only look
-// at mature objects. If the card changes then the card will be rescanned
-// at the next GC but that is fine.
-//
-// To do this we can simply force the hashes not to match by
-// changing the initial hashCardSeed for the next generational cycle.
-func rehashCards() {
-	// Simply change the hashCardSeed
-	// uintptrs don't overflow they just wrap around so
-	// overflow isn't an issue.
-	gen.hashCardSeed++
 }

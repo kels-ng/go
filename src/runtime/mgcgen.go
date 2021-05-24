@@ -67,8 +67,8 @@ import (
 // promote an object one simply sets its mark bit.
 //
 
-const (
-	gcGen      = true  // gcGen enables generational GC
+var (
+	gcGen      = false // gcGen enables generational GC
 	gcGenDebug = false // dump interesting debug information
 )
 
@@ -143,7 +143,7 @@ var gen = struct {
 	// Avoid generational GC if cost of a full GC, as reported by
 	// memstats.gc_cpu_fraction is < highGCCostThreshold.
 	// The value is given as an int percent.
-	highCostThreshold: 10,
+	highCostThreshold: 0,
 
 	// Statistics and interesting characterizations of the heap are kept
 	// in cycle specific as well as totals. Typically these are reported
@@ -263,6 +263,123 @@ func isGCCycleFull() bool {
 	return false
 }
 
+// setGenGcTrigger recalculate parameters for next GC cycle
+// The result will be used to decide Gen or Full cycle
+func setGenGcTrigger(fullCycle bool) {
+	if fullCycle {
+		rehashCards()
+	}
+
+	// isGCCycleFull always assumes the GC is not forced.
+	if gen.forceFullGC {
+		gen.forceFullGC = false
+	}
+
+	gen.cycleCount++
+	// gcSetTriggerRatio(nextTriggerRatio, fullCycle)
+
+	if work.userForced {
+		// Forced GCs do not participate in the decision to run generational GCs.
+		return
+	}
+
+	now := nanotime()
+	sweepTermCpu := int64(work.stwprocs) * (work.tMark - work.tSweepTerm)
+	// We report idle marking time below, but omit it from the
+	// overall utilization here since it's "free".
+	markTermCpu := int64(work.stwprocs) * (now - work.tMarkTerm)
+	mark := float64(sweepTermCpu + gcController.assistTime + gcController.dedicatedMarkTime + gcController.fractionalMarkTime +
+		gcController.idleMarkTime + markTermCpu) // Cost of the work in ms done in this cycle.
+	mark = mark / 1000.0
+	cons := float64(work.heap1-work.heap2) / float64(1<<20) // Amount of heap in MB freed up by this cycle, the cons of the mark/cons ratio.
+	if work.heap1 <= work.heap2 {
+		cons = .001 // 1Kbyte minimum.
+	}
+	markCons := mark / cons
+	if gcGenDebug && markCons < 0.0 {
+		println("markCons=", markCons, "work.stwprocs=", work.stwprocs, "work.tEnd=", work.tEnd, " work.tMarkTerm", work.tMarkTerm,
+			"\n      sweepTermCpu= ", sweepTermCpu, " markTermCpu= ", markTermCpu, " mark= ", mark, " cons= ", cons, " work.fullMarkConsEWMA= ", work.fullMarkConsEWMA)
+		throw("markCons should never be negative.")
+	}
+	if work.fullSwitchCount == 0 {
+		if work.fullSwitchBase == 0 {
+			work.fullSwitchBase = 8
+		}
+		work.fullSwitchCount = work.fullSwitchBase
+	}
+	if fullCycle {
+		work.genRunCount = 0
+		work.fullRunCount++
+		// isGCCycleFull() now refers to next cycle so use fullCycle.
+		// update fullMarkConsEWMA.
+		if work.fullMarkConsEWMA == 0.0 {
+			// uninitialized so no history set to markCons
+			work.fullMarkConsEWMA = markCons
+		} else {
+			// update the weighted decaying average (EWMA)
+			if markCons > 1.5*work.fullMarkConsEWMA {
+				work.fullMarkConsEWMA = (markCons*.05 + work.fullMarkConsEWMA*.95)
+			} else {
+				work.fullMarkConsEWMA = (markCons*.10 + work.fullMarkConsEWMA*.90)
+			}
+		}
+		if debug.gctrace > 1 {
+			println(" ** Finishing full cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
+				"gen.spaceFull=", gen.spaceFull,
+				"fullSwitchCount=", work.fullSwitchCount,
+				"work.genMarkConsEWMA", work.genMarkConsEWMA,
+				"work.fullMarkConsEWMA", work.fullMarkConsEWMA,
+				"work.fullRunCount", work.fullRunCount,
+				"work.genRunCount", work.genRunCount,
+				"work.fullSwitchBase", work.fullSwitchBase)
+		}
+	} else {
+		// Generational cycle
+		// update genMarkConsEWMA.
+		if work.genMarkConsEWMA == 0.0 {
+			// not initialized, set to markCons
+			work.genMarkConsEWMA = markCons
+		} else {
+			// EWMA weighted diminishing average. sum of relative contributions must be 1.
+			work.genMarkConsEWMA = (markCons*.10 + work.genMarkConsEWMA*.90)
+		}
+		work.fullRunCount = 0
+		work.genRunCount++
+		if markCons > work.fullMarkConsEWMA {
+			// The cost of this generational GC is greater than that of the EWMA of a full GC.
+			// Make the next cycle a full GC.
+			if work.genRunCount == 1 {
+				// Even the first generation GC didn't help delay trying again a bit.
+				if work.fullSwitchCount < work.fullSwitchBase*8 {
+					work.fullSwitchCount += work.fullSwitchBase
+				}
+			}
+		} else {
+			if work.genMarkConsEWMA > work.fullMarkConsEWMA {
+				if work.fullSwitchBase < 1 {
+					work.fullSwitchBase = 8
+				}
+				if work.genRunCount == 1 {
+					// Even the first generation GC didn't help delay trying again a bit.
+					if work.fullSwitchCount < work.fullSwitchBase*8 {
+						work.fullSwitchCount += work.fullSwitchBase
+					}
+				}
+			}
+		}
+		if debug.gctrace > 1 {
+			println(" ** Finishing Gen  cycle mark= ", mark, "cons= ", cons, "markCons = ", markCons,
+				"gen.spaceFull=", gen.spaceFull,
+				"fullSwitchCount=", work.fullSwitchCount,
+				"work.genMarkConsEWMA", work.genMarkConsEWMA,
+				"work.fullMarkConsEWMA", work.fullMarkConsEWMA,
+				"work.fullRunCount", work.fullRunCount,
+				"work.genRunCount", work.genRunCount,
+				"work.fullSwitchBase", work.fullSwitchBase, "Gen")
+		}
+	}
+}
+
 // isMature takes a span and an object index and returns true if
 // the object at that index is marked and therefore mature because it
 // survived the previous GC cycle.
@@ -350,13 +467,10 @@ func hashPointers(start, end uintptr, seed cardHash) cardHash {
 		}
 		// Load bits once. See CL 22712 and issue 16973 for discussion.
 		bits := hbits.bits()
-		// During checkmarking, 1-word objects store the checkmark
-		// in the type bit for the one word. The only one-word objects
-		// are pointers, or else they'd be merged with other non-pointer
-		// data into larger allocations.
+
 		// start may not be to the start of an object so this is overly conservative
 		// resulting in another harmless iteration.
-		if slot != start && slot != start+1*sys.PtrSize && bits&bitScan == 0 {
+		if slot != start && bits&bitScan == 0 {
 			break // no more pointers in this object
 		}
 		if bits&bitPointer == 0 {
@@ -384,13 +498,10 @@ func transitivelyPromoteReferents(start, end uintptr) {
 		}
 		// Load bits once. See CL 22712 and issue 16973 for discussion.
 		bits := hbits.bits()
-		// During checkmarking, 1-word objects store the checkmark
-		// in the type bit for the one word. The only one-word objects
-		// are pointers, or else they'd be merged with other non-pointer
-		// data into larger allocations.
+
 		// start may not be to the start of an object so this is overly conservative
 		// resulting in another harmless iteration.
-		if slot != start && slot != start+1*sys.PtrSize && bits&bitScan == 0 {
+		if slot != start && bits&bitScan == 0 {
 			break // no more pointers in this object
 		}
 		if bits&bitPointer == 0 {
@@ -404,9 +515,11 @@ func transitivelyPromoteReferents(start, end uintptr) {
 		if !inheap(obj) {
 			continue
 		}
+
+		// Transitively promote all reachable young object.
 		mbits := markBitsForAddr(obj)
 		if !mbits.isMarked() {
-			shade(obj) // Transitively promote all reachable young object.
+			shade(obj)
 		}
 	}
 }
@@ -428,12 +541,12 @@ func processCardShard(n int) {
 	if trace {
 		println("allArenaIndex=", allArenaIndex, "n=", n, "cardShardsPerArena=", cardShardsPerArena)
 	}
-	arenaIndex := mheap_.allArenas[allArenaIndex]
+	arenaIndex := mheap_.markArenas[allArenaIndex]
 	heapArena := mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()]
 	shardIndex := n % cardShardsPerArena
 	if trace {
 		println("arenaIndex.l1()=", arenaIndex.l1(), "arenaIndex.l2()=", arenaIndex.l2(),
-			"len(mheap_.allArenas)=", len(mheap_.allArenas),
+			"len(mheap_.markArenas)=", len(mheap_.markArenas),
 			"len(mheap_.arenas[arenaIndex.l1()]", len(mheap_.arenas[arenaIndex.l1()]),
 			"mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()]", mheap_.arenas[arenaIndex.l1()][arenaIndex.l2()])
 
@@ -507,4 +620,21 @@ func initCardShardBase(ha *heapArena, base uintptr) {
 	for i := 0; i < len(ha.cardShards); i++ {
 		ha.cardShards[i].shardBase = base + uintptr(cardShardBytes*i)
 	}
+}
+
+// The GC is near completion. There are no gray objects so therefore no
+// reachable white objects. All objects have their mark/mature bit set correctly.
+// The write barrier is on so we are allocating black/mature objects. There is no
+// way that a white pointer can be written into the heap.
+// This means that we can rehash all of the cards provided we only look
+// at mature objects. If the card changes then the card will be rescanned
+// at the next GC but that is fine.
+//
+// To do this we can simply force the hashes not to match by
+// changing the initial hashCardSeed for the next generational cycle.
+func rehashCards() {
+	// Simply change the hashCardSeed
+	// uintptrs don't overflow they just wrap around so
+	// overflow isn't an issue.
+	gen.hashCardSeed++
 }

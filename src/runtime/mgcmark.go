@@ -121,13 +121,11 @@ func gcMarkRootPrepare() {
 	// Full cycle GCs collect the mature areas so nMatureRoots is
 	// set to 0, which acts as a noop as far as the markroot routine
 	// is concerned.
-	if gcGen {
-		if !isGCCycleFull() {
-			work.nMatureRoots = len(mheap_.allArenas) * cardShardsPerArena
-		} else {
-			// 0 will noop the scanning of ther roots in mature space.
-			work.nMatureRoots = 0
-		}
+	if !isGCCycleFull() {
+		work.nMatureRoots = len(mheap_.markArenas) * cardShardsPerArena
+	} else {
+		// 0 will noop the scanning of ther roots in mature space.
+		work.nMatureRoots = 0
 	}
 
 	// Scan stacks.
@@ -427,9 +425,6 @@ func markrootMature(gcw *gcWork, shard int) {
 	// TODO(austin): There are several ideas for making this more
 	// efficient in issue #11485.
 	if gcGenDebug {
-		if atomic.Load(&gcphase) == _GCoff {
-			throw("why markrootMature is gcphase == _GCoff")
-		}
 		if atomic.Load(&gcphase) == _GCoff {
 			throw("why markrootMature is gcphase == _GCoff")
 		}

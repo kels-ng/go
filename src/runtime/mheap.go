@@ -1513,9 +1513,9 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType, trimmed bool) {
 	//
 	// If the span was trimmed off an already free span then we know the interior
 	// mheap_.spans entries are already nil.
-	if gcGen && s.npages > 2 && !trimmed {
-		mheap_.setSpansNil(s.base()+pageSize, s.npages-2)
-	}
+	// if gcGen && s.npages > 2 && !trimmed {
+	// mheap_.setSpansNil(s.base()+pageSize, s.npages-2)
+	// }
 
 	// Update stats.
 	//

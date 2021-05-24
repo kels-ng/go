@@ -134,6 +134,10 @@ func finishsweep_m() {
 		sweep.npausesweep++
 	}
 
+	if gen.forceFullGC {
+		allocFreshMarkBits()
+	}
+
 	// Reset all the unswept buffers, which should be empty.
 	// Do this in sweep termination as opposed to mark termination
 	// so that we can catch unswept spans and reclaim blocks as
@@ -153,7 +157,7 @@ func finishsweep_m() {
 	// Call after full GC cycle but not during a generational GC
 	// since there a sticky bit maps being used for both allocation
 	// as well as marking.
-	if !gcGen || isGCCycleFull() {
+	if isGCCycleFull() {
 		// Doing a full gc so the current alloc bits are no longer of interest.
 		nextMarkBitArenaEpoch()
 	}
@@ -484,17 +488,12 @@ func (s *mspan) sweep(preserve bool) bool {
 	// and then discards them with the above
 	// statement. To turn on generational GC minor GC cycles need
 	// to start with the allocBits as the gcmarkBits.
-	if !gcGen || isGCCycleFull() {
+	if isGCCycleFull() {
 		// Since all spans are swept between GCs this is where we set up the
 		// mark bits for the next GC.
 		// Set up cleared mark bits if the next GC is a full GC.
 		// Otherwise the mark bits are sticky and the same as the alloc bits.
 		s.gcmarkBits = newMarkBits(s.nelems)
-	}
-
-	if gcGen {
-		// The theory being zeroing during the malloc will act as a prefetch.
-		s.needzero = 1
 	}
 
 	// Initialize alloc bits cache.
@@ -636,7 +635,9 @@ func (s *mspan) reportZombies() {
 			hexdumpWords(addr, addr+length, nil)
 		}
 		mbits.advance()
-		abits.advance()
+		if s.allocBits != s.gcmarkBits {
+			abits.advance()
+		}
 	}
 	throw("found pointer to free object")
 }
@@ -743,7 +744,7 @@ func checkAllocBits() {
 				println("runtime: s=", s, "index i=", i, " s.state =", mSpanStateNames[s.state.get()], "s.gcmarkBits = ", s.gcmarkBits,
 					"s.allocBits=", s.allocBits, "s.nelems=", s.nelems, "s.base()=", hex(s.base()),
 					"s.elemsize=", s.elemsize, "s.spanclass.noscan()", s.spanclass.noscan())
-				// throw("why s.gcmarkBits != s.allocBits")
+				throw("why s.gcmarkBits != s.allocBits")
 			}
 		}
 	}
