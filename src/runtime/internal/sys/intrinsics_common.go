@@ -141,3 +141,29 @@ func TrailingZeros8(x uint8) int {
 func Len8(x uint8) int {
 	return int(len8tab[x])
 }
+
+// Locality hint to point a location in the cache hierarchy
+const (
+	// x86: T0 (temporal data)-prefetch data into all levels of the cache hierarchy.
+	//
+	// ARM64: Produce PLDL1KEEP instruction. Prefetch memory to L1 cache level
+	PrefetchLocality0 = iota
+	// x86: T1 (temporal data with respect to first level cache)-prefetch data into level 2 cache and higher.
+	//
+	// ARM64: Produce PLDL2KEEP instruction. Prefetch memory to L2 cache level
+	PrefetchLocality1
+	// x86: T2 (temporal data with respect to second level cache)-prefetch data into level 2 cache and higher.
+	//
+	// ARM64: Produce PLDL3KEEP instruction. Prefetch memory to L3 cache level
+	PrefetchLocality2
+	// x86: NTA (non-temporal data with respect to all cache levels)-prefetch data
+	// into non-temporal cache structure and into a location close to the
+	// processor, minimizing cache pollution.
+	//
+	// ARM64: Produce PLDL3KEEP instruction. Prefetch memory to L3 cache level due to there is no NTA
+	PrefetchLocalityNTA
+)
+
+// PrefetchMemory - fetch data from memory addr to CPU cache line
+// using locality hint - level
+func Prefetch(addr uintptr, level int) {}

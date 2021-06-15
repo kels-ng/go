@@ -618,6 +618,9 @@ var genericOps = []opData{
 	// Clobber experiment op
 	{name: "Clobber", argLength: 0, typ: "Void", aux: "SymOff", symEffect: "None"}, // write an invalid pointer value to the given pointer slot of a stack variable
 	{name: "ClobberReg", argLength: 0, typ: "Void"},                                // clobber a register
+
+	// Prefetch instruction
+	{name: "PrefetchCache", argLength: 3, hasSideEffects: true}, // Do prefetch arg0 to locality arg1. arg0=addr, arg1=locality hint, arg2=memory.
 }
 
 //     kind          controls        successors   implicit exit

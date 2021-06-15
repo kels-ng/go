@@ -1107,11 +1107,6 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 			gcw.balance()
 		}
 
-		// This might be a good place to add prefetch code...
-		// if(wbuf.nobj > 4) {
-		//         PREFETCH(wbuf->obj[wbuf.nobj - 3];
-		//  }
-		//
 		b := gcw.tryGetFast()
 		if b == 0 {
 			b = gcw.tryGet()
@@ -1138,6 +1133,18 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 			// No heap or root jobs.
 			break
 		}
+
+		// Prefetch object in order to scan
+		// There is not so many time to prefetch data from the memory.
+		// There are few function calls inside scanobject that are
+		// using b address to calculate arena index, bitmap index, and
+		// span index without dereference operation.
+		// Actual pointer dereference is caused just before greyobject
+		// call.
+		// Also, gcDrainN is called only during gcAssist, so probably
+		// this P didn't have any prefetched objects
+		sys.Prefetch(b, sys.PrefetchLocality0)
+
 		scanobject(b, gcw)
 
 		// Flush background scan work credit.
@@ -1440,12 +1447,13 @@ func greyobject(obj, base, off uintptr, span *mspan, gcw *gcWork, objIndex uintp
 		}
 	}
 
-	// Queue the obj for scanning. The PREFETCH(obj) logic has been removed but
-	// seems like a nice optimization that can be added back in.
-	// There needs to be time between the PREFETCH and the use.
-	// Previously we put the obj in an 8 element buffer that is drained at a rate
-	// to give the PREFETCH time to do its work.
-	// Use of PREFETCHNTA might be more appropriate than PREFETCH
+	// Likely, this object will be processed next by the same P due to
+	// we put object to local P wbuf. Object's buffer goes to global
+	// queue only if wbuf is full. In this case there is some cache
+	// usage inefficiency, but platforms with inclusive shared
+	// cache can still get advantage
+	sys.Prefetch(obj, sys.PrefetchLocality0)
+	// Queue the obj for scanning.
 	if !gcw.putFast(obj) {
 		gcw.put(obj)
 	}

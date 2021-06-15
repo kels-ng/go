@@ -51,6 +51,12 @@ var complements = []obj.As{
 	ACMNW: ACMPW,
 }
 
+// Exception list for 0->ZR replacing in To operand
+var zrToExceptions = map[obj.As]bool{
+	// Exclude PRFM instruction due to it's not allowed to use ZR here
+	APRFM: true,
+}
+
 func (c *ctxt7) stacksplit(p *obj.Prog, framesize int32) *obj.Prog {
 	// MOV	g_stackguard(g), R1
 	p = obj.Appendp(p, c.newprog)
@@ -222,7 +228,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REGZERO
 	}
-	if p.To.Type == obj.TYPE_CONST && p.To.Offset == 0 {
+	if p.To.Type == obj.TYPE_CONST && p.To.Offset == 0 && !zrToExceptions[p.As] {
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REGZERO
 	}

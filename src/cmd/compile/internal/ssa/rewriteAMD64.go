@@ -950,6 +950,8 @@ func rewriteValueAMD64(v *Value) bool {
 		return true
 	case OpPopCount8:
 		return rewriteValueAMD64_OpPopCount8(v)
+	case OpPrefetchCache:
+		return rewriteValueAMD64_OpPrefetchCache(v)
 	case OpRotateLeft16:
 		v.Op = OpAMD64ROLW
 		return true
@@ -31397,6 +31399,68 @@ func rewriteValueAMD64_OpPopCount8(v *Value) bool {
 		v.AddArg(v0)
 		return true
 	}
+}
+func rewriteValueAMD64_OpPrefetchCache(v *Value) bool {
+	v_2 := v.Args[2]
+	v_1 := v.Args[1]
+	v_0 := v.Args[0]
+	// match: (PrefetchCache addr locality mem)
+	// cond: (locality.AuxInt == 0)
+	// result: (PrefetchT0 addr mem)
+	for {
+		addr := v_0
+		locality := v_1
+		mem := v_2
+		if !(locality.AuxInt == 0) {
+			break
+		}
+		v.reset(OpAMD64PrefetchT0)
+		v.AddArg2(addr, mem)
+		return true
+	}
+	// match: (PrefetchCache addr locality mem)
+	// cond: (locality.AuxInt == 1)
+	// result: (PrefetchT1 addr mem)
+	for {
+		addr := v_0
+		locality := v_1
+		mem := v_2
+		if !(locality.AuxInt == 1) {
+			break
+		}
+		v.reset(OpAMD64PrefetchT1)
+		v.AddArg2(addr, mem)
+		return true
+	}
+	// match: (PrefetchCache addr locality mem)
+	// cond: (locality.AuxInt == 2)
+	// result: (PrefetchT2 addr mem)
+	for {
+		addr := v_0
+		locality := v_1
+		mem := v_2
+		if !(locality.AuxInt == 2) {
+			break
+		}
+		v.reset(OpAMD64PrefetchT2)
+		v.AddArg2(addr, mem)
+		return true
+	}
+	// match: (PrefetchCache addr locality mem)
+	// cond: (locality.AuxInt == 3)
+	// result: (PrefetchNTA addr mem)
+	for {
+		addr := v_0
+		locality := v_1
+		mem := v_2
+		if !(locality.AuxInt == 3) {
+			break
+		}
+		v.reset(OpAMD64PrefetchNTA)
+		v.AddArg2(addr, mem)
+		return true
+	}
+	return false
 }
 func rewriteValueAMD64_OpRoundToEven(v *Value) bool {
 	v_0 := v.Args[0]

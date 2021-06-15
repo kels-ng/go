@@ -2235,3 +2235,9 @@
 	&& isInlinableMemmove(dst, src, sz, config)
 	&& clobber(call)
 	=> (Move [sz] dst src mem)
+
+// Prefetch instructions
+(PrefetchCache addr locality mem) && (locality.AuxInt == 0) => (PrefetchT0 addr mem)
+(PrefetchCache addr locality mem) && (locality.AuxInt == 1) => (PrefetchT1 addr mem)
+(PrefetchCache addr locality mem) && (locality.AuxInt == 2) => (PrefetchT2 addr mem)
+(PrefetchCache addr locality mem) && (locality.AuxInt == 3) => (PrefetchNTA addr mem)

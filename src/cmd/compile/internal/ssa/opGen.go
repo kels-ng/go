@@ -1029,6 +1029,10 @@ const (
 	OpAMD64ANDLlock
 	OpAMD64ORBlock
 	OpAMD64ORLlock
+	OpAMD64PrefetchT0
+	OpAMD64PrefetchT1
+	OpAMD64PrefetchT2
+	OpAMD64PrefetchNTA
 
 	OpARMADD
 	OpARMADDconst
@@ -1610,6 +1614,7 @@ const (
 	OpARM64LoweredPanicBoundsA
 	OpARM64LoweredPanicBoundsB
 	OpARM64LoweredPanicBoundsC
+	OpARM64PRFM
 
 	OpMIPSADD
 	OpMIPSADDconst
@@ -2912,6 +2917,7 @@ const (
 	OpAtomicOr32Variant
 	OpClobber
 	OpClobberReg
+	OpPrefetchCache
 )
 
 var opcodeTable = [...]opInfo{
@@ -13553,6 +13559,50 @@ var opcodeTable = [...]opInfo{
 			},
 		},
 	},
+	{
+		name:           "PrefetchT0",
+		argLen:         2,
+		hasSideEffects: true,
+		asm:            x86.APREFETCHT0,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+			},
+		},
+	},
+	{
+		name:           "PrefetchT1",
+		argLen:         2,
+		hasSideEffects: true,
+		asm:            x86.APREFETCHT1,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+			},
+		},
+	},
+	{
+		name:           "PrefetchT2",
+		argLen:         2,
+		hasSideEffects: true,
+		asm:            x86.APREFETCHT2,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+			},
+		},
+	},
+	{
+		name:           "PrefetchNTA",
+		argLen:         2,
+		hasSideEffects: true,
+		asm:            x86.APREFETCHNTA,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+			},
+		},
+	},
 
 	{
 		name:        "ADD",
@@ -21442,6 +21492,18 @@ var opcodeTable = [...]opInfo{
 			inputs: []inputInfo{
 				{0, 1}, // R0
 				{1, 2}, // R1
+			},
+		},
+	},
+	{
+		name:           "PRFM",
+		auxType:        auxInt64,
+		argLen:         2,
+		hasSideEffects: true,
+		asm:            arm64.APRFM,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1744568319}, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R19 R20 R21 R22 R23 R24 R25 R26 R30 SP
 			},
 		},
 	},
@@ -36212,6 +36274,12 @@ var opcodeTable = [...]opInfo{
 		name:    "ClobberReg",
 		argLen:  0,
 		generic: true,
+	},
+	{
+		name:           "PrefetchCache",
+		argLen:         3,
+		hasSideEffects: true,
+		generic:        true,
 	},
 }
 
