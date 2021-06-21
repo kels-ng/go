@@ -4622,6 +4622,8 @@ func InitTables() {
 			return nil
 		},
 		sys.AMD64, sys.ARM64)
+
+	alias("runtime", "PrefetchMemory", "runtime/internal/sys", "Prefetch", all...)
 }
 
 // findIntrinsic returns a function which builds the SSA equivalent of the
